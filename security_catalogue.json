@@ -3364,29 +3364,24 @@
       "id": "bcdedit-disable-boot-debug",
       "originalName": "Disable Boot Debugging / Protect BitLocker",
       "friendlyName": "Disable BCD bootdebug/debug flags (BitLocker physical-attack hardening)",
-      "description": "Windows Boot Configuration Data carries two debug flags that, if left on, give a physical attacker a path around TPM-only BitLocker: 'bootdebug' attaches a kernel debugger to the boot loader and 'debug' attaches one to the running kernel, both of which can be exercised pre-volume-unlock to inspect or modify the boot sequence and ultimately drop the attacker into an environment that can read protected data. Microsoft's BitLocker countermeasures and the Microsoft Security Baseline both call out disabling these as a baseline mitigation against direct-memory-access (DMA), evil-maid and cold-boot-class attacks where an attacker has physical possession of the machine. The fix is the documented 'bcdedit /set {default} bootdebug off' and 'bcdedit /set {default} debug off' pair, which writes to the live BCD store. The values stick across reboots and require physical or admin access to flip back, so they are also a useful tamper-evidence baseline to monitor.",
+      "description": "Windows Boot Configuration Data carries two debug flags that, if left on, give a physical attacker a path around TPM-only BitLocker: 'bootdebug' attaches a kernel debugger to the boot loader and 'debug' attaches one to the running kernel, both of which can be exercised pre-volume-unlock to inspect or modify the boot sequence and ultimately drop the attacker into an environment that can read protected data. Microsoft's BitLocker countermeasures and the Microsoft Security Baseline both call out disabling these as a baseline mitigation against direct-memory-access (DMA), evil-maid and cold-boot-class attacks where an attacker has physical possession of the machine. The fix loops over every relevant boot identifier - {default} for the OS loader, {bootmgr} for the Windows Boot Manager itself (which runs before any volume is unlocked and is therefore the most attractive pre-OS attach point), and {memdiag} for the Memory Diagnostic boot entry - and turns both flags off on each. The values stick across reboots and require physical or admin access to flip back, so they are also a useful tamper-evidence baseline to monitor.",
       "severity": "High",
       "compatibility": "Caution",
-      "compatNote": "Disables kernel and boot debugging on this machine. Legitimate impact is limited to driver developers and kernel debuggers (WinDbg over serial / 1394 / USB / network) - if you do live kernel debugging, leave these enabled and use BitLocker with a TPM+PIN or TPM+startup-key protector instead. End users see no behaviour change; reboots are unaffected. Note that the BCD store is per-bootloader-entry: '{default}' covers the typical single-OS install but if you have multi-boot / Insider / recovery entries, repeat for each identifier returned by 'bcdedit /enum'.",
+      "compatNote": "Disables kernel and boot debugging on this machine. Legitimate impact is limited to driver developers and kernel debuggers (WinDbg over serial / 1394 / USB / network) - if you do live kernel debugging, leave these enabled and use BitLocker with a TPM+PIN or TPM+startup-key protector instead. End users see no behaviour change; reboots are unaffected. Note: not every identifier supports both flags - {memdiag} in particular is a memory-test entry whose element schema does not include the kernel 'debug' element, so 'bcdedit /set {memdiag} debug off' may print 'The set command specified is not valid' and exit non-zero. The implementation absorbs that, treats {memdiag} as best-effort, and continues; it does not abort the run. If you have multi-boot / Insider / Recovery entries, run 'bcdedit /enum all' yourself and apply the same pair to each additional identifier you find.",
       "bdRiskOriginal": 0,
       "previouslyIgnored": false,
       "implementation": {
         "type": "command",
         "command": [
           {
-            "shell": "cmd",
-            "command": "bcdedit /set {default} bootdebug off",
-            "description": "Disables boot loader debugging on the default boot entry. Prevents an attacker with physical access from attaching a debugger to the bootmgr/winload pre-BitLocker-unlock."
-          },
-          {
-            "shell": "cmd",
-            "command": "bcdedit /set {default} debug off",
-            "description": "Disables kernel-mode debugging on the default boot entry. Prevents post-boot debugger attach paths that could be used to read decrypted volume contents."
+            "shell": "powershell",
+            "command": "foreach ($id in '{default}','{bootmgr}','{memdiag}') { foreach ($flag in 'bootdebug','debug') { $r = & bcdedit.exe /set $id $flag off 2>&1; if ($LASTEXITCODE -ne 0) { Write-Warning \"bcdedit /set $id $flag off -> exit $LASTEXITCODE : $r\" } else { Write-Host \"  [OK]  bcdedit /set $id $flag off\" } } }",
+            "description": "Loops over the three documented boot identifiers ({default} = OS loader, {bootmgr} = Windows Boot Manager pre-OS, {memdiag} = Memory Diagnostic) and turns both bootdebug and debug off on each. Per-identifier failures are logged as warnings and do not abort the run - this matters because {memdiag} legitimately rejects the 'debug' element on most builds."
           }
         ],
-        "notes": "Effective on next boot. Rollback: 'bcdedit /set {default} bootdebug on' and 'bcdedit /set {default} debug on'. To audit other boot entries, run 'bcdedit /enum' and apply the same pair to each identifier (some recovery / Insider entries may need separate treatment). Pair with TPM+PIN BitLocker protectors and disable 1394/Thunderbolt DMA via 'Disable new DMA devices when this computer is locked' (already covered by Microsoft Security Baseline) for full physical-attack hardening."
+        "notes": "Effective on next boot. Rollback: replace 'off' with 'on' in the loop above, or run 'bcdedit /set <id> <flag> on' manually. To audit, run 'bcdedit /enum all' and look for 'bootdebug' and 'debug' lines under each identifier - both should read 'No'. The {bootmgr} entry runs BEFORE any BitLocker volume is unlocked, which is why locking it down is a meaningful uplift over only locking {default}: an attacker with physical access who can attach a debugger to bootmgr can manipulate the boot sequence before winload.exe ever asks the TPM for the volume master key. Pair with TPM+PIN BitLocker protectors and the 'Disable new DMA devices when this computer is locked' Microsoft Security Baseline setting for full physical-attack hardening."
       },
-      "verification": "$bcd = (& bcdedit /enum '{default}' | Out-String); ($bcd -match 'bootdebug\\s+No') -and ($bcd -match '(?<![a-z])debug\\s+No')",
+      "verification": "$ok = $true; foreach ($id in '{default}','{bootmgr}') { $bcd = (& bcdedit.exe /enum $id 2>&1 | Out-String); if (-not (($bcd -match 'bootdebug\\s+No') -and ($bcd -match '(?<![a-z])debug\\s+No'))) { $ok = $false } }; $bcd = (& bcdedit.exe /enum '{memdiag}' 2>&1 | Out-String); if ($bcd -match 'bootdebug\\s+Yes') { $ok = $false }; $ok",
       "references": [
         {
           "label": "Microsoft Learn - BitLocker countermeasures (physical attack mitigations)",

@@ -71,25 +71,80 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:Version       = '1.0.0'
-$script:DataDir       = Join-Path $env:LOCALAPPDATA 'Win11Debloat'
+# Snapshots and logs live in %ProgramData%, not %LOCALAPPDATA%, so a standard
+# user (or per-user malware) cannot mutate them between the time an admin
+# applies changes and the time they roll them back. The directory is ACL-
+# locked at creation - see Set-AdminOnlyAcl below.
+$script:DataDir       = Join-Path $env:ProgramData 'Win11Debloat'
 $script:SnapshotDir   = Join-Path $script:DataDir 'snapshots'
 $script:LogDir        = Join-Path $script:DataDir 'logs'
+$script:RecoveryDir   = Join-Path $env:SystemDrive 'Win11Debloat-Recovery'
+$script:LegacyDataDir = Join-Path $env:LOCALAPPDATA 'Win11Debloat'  # for migration hint
 $script:LogPath       = $null
 $script:LogTextBox    = $null
 $script:DryRun        = [bool]$DryRun
 $script:Snapshot      = $null
 
 # -----------------------------------------------------------------------------
+# Set-AdminOnlyAcl
+# Lock a directory so only Administrators + SYSTEM may write, Users may read.
+# Disables inheritance and drops every inherited rule. Used for both the
+# %ProgramData% data dir and C:\Win11Debloat-Recovery (which inherits permissive
+# rules from C:\ root by default - in particular, CREATOR OWNER lets a standard
+# user pre-create a subfolder there before we exist).
+# -----------------------------------------------------------------------------
+function Set-AdminOnlyAcl {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $acl = Get-Acl -Path $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+        $admins = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+        $system = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
+        $users  = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545'
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $admins,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $system,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $users,'ReadAndExecute','ContainerInherit,ObjectInherit','None','Allow')))
+        Set-Acl -Path $Path -AclObject $acl
+    } catch {
+        # Don't crash the run if ACL hardening fails; surface a warning so the
+        # admin knows the directory is using inherited permissions.
+        Write-Host "[WARN] Could not lock ACLs on $Path : $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+# -----------------------------------------------------------------------------
 # Initialization
 # -----------------------------------------------------------------------------
 function Initialize-DataDirs {
+    # Pre-creation defense: if a standard user (or attacker) has pre-created
+    # the data dir at the well-known path with weak ACLs, take ownership and
+    # re-lock it. We do this BEFORE writing anything inside.
     foreach ($d in @($script:DataDir, $script:SnapshotDir, $script:LogDir)) {
         if (-not (Test-Path $d)) {
             New-Item -Path $d -ItemType Directory -Force | Out-Null
         }
+        Set-AdminOnlyAcl -Path $d
     }
+    # Same hardening for the recovery dir (root of C:\ allows pre-creation).
+    if (-not (Test-Path $script:RecoveryDir)) {
+        New-Item -Path $script:RecoveryDir -ItemType Directory -Force | Out-Null
+    }
+    Set-AdminOnlyAcl -Path $script:RecoveryDir
+
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
     $script:LogPath = Join-Path $script:LogDir "run-$stamp.log"
+
+    # Migration hint: if the legacy %LOCALAPPDATA% snapshots exist, point at them.
+    $legacySnap = Join-Path $script:LegacyDataDir 'snapshots'
+    if (Test-Path $legacySnap) {
+        Write-Host "[i] Legacy snapshots found at $legacySnap. They are read-only" -ForegroundColor Cyan
+        Write-Host "    in this version - copy them to $script:SnapshotDir if you" -ForegroundColor Cyan
+        Write-Host "    need to roll back to a pre-migration state." -ForegroundColor Cyan
+    }
 }
 
 function Write-Log {
@@ -223,8 +278,11 @@ function Save-RecoveryRegFile {
     if (-not $script:Snapshot -or -not $script:Snapshot.registry -or
         $script:Snapshot.registry.Count -eq 0) { return $null }
 
-    $recDir = Join-Path $env:SystemDrive 'Win11Debloat-Recovery'
-    if (-not (Test-Path $recDir)) { New-Item -Path $recDir -ItemType Directory -Force | Out-Null }
+    $recDir = $script:RecoveryDir
+    if (-not (Test-Path $recDir)) {
+        New-Item -Path $recDir -ItemType Directory -Force | Out-Null
+        Set-AdminOnlyAcl -Path $recDir
+    }
     $outPath = Join-Path $recDir "undo-$Stamp.reg"
 
     $sb = New-Object System.Text.StringBuilder
@@ -355,8 +413,20 @@ function Invoke-SnapshotRestore {
                 New-ItemProperty -Path $r.path -Name $r.name -Value $r.oldValue -PropertyType $type -Force | Out-Null
                 Write-Log "  [OK] $($r.path)\$($r.name) <- $($r.oldValue)" 'DarkGray'
             } else {
-                Remove-ItemProperty -Path $r.path -Name $r.name -ErrorAction SilentlyContinue
-                Write-Log "  [OK] removed $($r.path)\$($r.name) (didn't exist before)" 'DarkGray'
+                # Defensive try/catch: terminating errors here can only happen
+                # if e.g. a parent key was deleted offline (registry hive
+                # mounted from a different OS, user manually nuked the key).
+                # We don't want such offline-mutation cases to crash a rollback.
+                try {
+                    Remove-ItemProperty -Path $r.path -Name $r.name -ErrorAction Stop
+                    Write-Log "  [OK] removed $($r.path)\$($r.name) (didn't exist before)" 'DarkGray'
+                } catch [System.Management.Automation.ItemNotFoundException] {
+                    Write-Log "  [--] $($r.path)\$($r.name) already absent (parent key gone)" 'DarkGray'
+                } catch [System.Management.Automation.PSArgumentException] {
+                    Write-Log "  [--] $($r.path)\$($r.name) value not present (already removed)" 'DarkGray'
+                } catch {
+                    Write-Log "  [WARN] could not remove $($r.path)\$($r.name): $($_.Exception.Message)" 'Yellow'
+                }
             }
         } catch {
             Write-Log "  [WARN] could not restore $($r.path)\$($r.name): $($_.Exception.Message)" 'Yellow'
@@ -446,8 +516,35 @@ function New-SystemRestorePoint-Safe {
         if ($script:Snapshot) { $script:Snapshot.restorePoint = @{ description=$Description; timestamp=(Get-Date).ToString('o') } }
         return $true
     } catch {
-        Write-Log "[Restore Point] FAILED: $($_.Exception.Message)" 'Red'
-        Write-Log "  Continuing anyway. Per-action snapshot will still be saved." 'Yellow'
+        $msg = $_.Exception.Message
+        Write-Log "[Restore Point] FAILED: $msg" 'Red'
+        Write-Log "  System Protection may be off, or another restore point was just created." 'Yellow'
+        Write-Log "  The per-action JSON snapshot + .reg recovery file will still be saved," 'Yellow'
+        Write-Log "  but Windows-level System Restore will NOT be available for this run." 'Yellow'
+
+        # Confirm with the operator before proceeding without the OS-level safety net.
+        # GUI: MessageBox; CLI: warning + Read-Host. Skipped under -DryRun (no real changes).
+        if ($script:DryRun) { return $false }
+        $proceed = $true
+        if ($script:LogTextBox) {
+            try {
+                Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+                $r = [System.Windows.Forms.MessageBox]::Show(
+                    "System Restore Point creation failed:`r`n`r`n$msg`r`n`r`n" +
+                    "If you proceed, only the per-action JSON snapshot and the .reg recovery file " +
+                    "in $($script:RecoveryDir) will be available for rollback. Windows System Restore will NOT be.`r`n`r`n" +
+                    "Continue anyway?",
+                    'Restore Point Failed','YesNo','Warning')
+                $proceed = ($r -eq 'Yes')
+            } catch { $proceed = $true }
+        } else {
+            Write-Warning "Continuing without a System Restore Point. Press Ctrl+C now to abort, or Enter to proceed."
+            try { [void](Read-Host) } catch { }
+        }
+        if (-not $proceed) {
+            Write-Log "[Restore Point] User declined to continue. Aborting." 'Red'
+            throw "Aborted by user after Restore Point failure."
+        }
         return $false
     }
 }
@@ -682,9 +779,19 @@ $script:TelemetryActions = @(
     @{
         Id='tel-allow-telemetry-zero'
         Title='Set AllowTelemetry policy to Security (lowest) - 0 on Pro/Enterprise'
-        Detail='Pro respects the 0 (Security) setting. Equivalent to "Required only" in the UI plus stricter.'
+        Detail='Pro respects the 0 (Security) setting. Pairs with MaxTelemetryAllowed=0 and LimitEnhancedDiagnosticDataWindowsAnalytics=1 so neither user nor Microsoft Analytics can re-raise the level above Security.'
         Category='Telemetry'
-        Action={ Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" "AllowTelemetry" 0; Set-Reg "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" "AllowTelemetry" 0 }
+        Action={
+            Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" "AllowTelemetry" 0
+            Set-Reg "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" "AllowTelemetry" 0
+            # Cap the maximum any caller can request - blocks e.g. Insider/Beta builds
+            # from raising telemetry back to Optional via DataCollection MaxTelemetryAllowed.
+            Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" "MaxTelemetryAllowed" 0
+            # Stop Windows Analytics / Desktop Analytics from collecting Enhanced level
+            # diagnostic data even when AllowTelemetry says Security. Documented in the
+            # Microsoft Security Baseline.
+            Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" "LimitEnhancedDiagnosticDataWindowsAnalytics" 1
+        }
     }
     @{
         Id='tel-disable-feedback'
@@ -753,6 +860,11 @@ $script:TelemetryActions = @(
             # sufficient on their own).
             Set-Reg "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 1
             Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "DisableWebSearch" 1
+            # ADMX-backed: explicitly forbid the connected/web search code path
+            # and the cloud-content search index. These are the canonical pair
+            # used by enterprise policy to remove web results from Start.
+            Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "ConnectedSearchUseWeb" 0
+            Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "AllowCloudSearch" 0
             # Don't send writing data / URL paths back to Microsoft
             Set-Reg "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitInkCollection" 1
             Set-Reg "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitTextCollection" 1
