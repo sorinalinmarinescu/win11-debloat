@@ -1,122 +1,138 @@
-# Win11 Debloat
+# Win11 Debloat & Hardening
 
-A small PowerShell tool that turns off Windows 11 Pro's ads, promos and "suggestions"
-without breaking functionality. Optional GUI lets you pick which sections to apply
-and which preinstalled bloat apps to uninstall.
+A PowerShell tool with a Windows Forms GUI that disables Windows 11 ads and
+telemetry, removes pre-installed bloat, and applies Bitdefender-derived
+security hardening — with snapshot/restore, System Restore Point creation,
+and config export/import for admin → end-user distribution.
 
 ## Quick start (one-liner)
 
-Open **any PowerShell window** and paste this. It downloads the script to `%TEMP%`
-and re-launches it elevated, then the GUI appears (UAC prompt is normal).
+Open **any PowerShell window** and paste:
 
 ```powershell
-$u='https://raw.githubusercontent.com/sorinalinmarinescu/win11-debloat/main/Win11Debloat.ps1'; $f="$env:TEMP\Win11Debloat.ps1"; iwr $u -OutFile $f -UseBasicParsing; Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File',"`"$f`""
+irm https://raw.githubusercontent.com/sorinalinmarinescu/win11-debloat/main/bootstrap.ps1 | iex
 ```
 
-In the GUI:
-1. Leave all 9 ad-disabling sections checked (default).
-2. Optionally tick apps under **Tier 1** (safe bloat) and/or **Tier 2** (real apps).
-3. Tick **Dry run** to preview, or click **Apply** to do it for real.
-4. Sign out / reboot afterwards.
+The bootstrap downloads `Win11Debloat.ps1` + `security_catalogue.json` to
+`%TEMP%\Win11Debloat\`, then re-launches elevated (UAC prompt). The GUI opens
+with everything **unchecked** by default — you choose what to apply.
 
-## Manual install
+## Workflows
 
-```powershell
-# 1. Open Terminal (Admin)
-# 2. Download
-iwr https://raw.githubusercontent.com/sorinalinmarinescu/win11-debloat/main/Win11Debloat.ps1 -OutFile "$HOME\Desktop\Win11Debloat.ps1"
-# 3. Run
-Set-ExecutionPolicy -Scope Process Bypass -Force
-& "$HOME\Desktop\Win11Debloat.ps1"
-```
+### Individual user
 
-## Command-line mode
+1. Open the GUI. Browse the tabs (Ads, Telemetry, Bloat Apps, plus a Security
+   tab per category).
+2. *(Optional)* click **Export config** to capture your starting state.
+3. Tick the actions you want.
+4. *(Optional)* tick **Dry run** to preview without changes.
+5. Click **Apply**. A System Restore Point + a per-action snapshot are
+   created automatically.
+6. If something breaks: **Rollback snapshot** to revert, or **Import config**
+   to load a previously-known-good selection and re-apply.
 
-```powershell
-.\Win11Debloat.ps1 -NoGui                              # ads only, defaults
-.\Win11Debloat.ps1 -NoGui -RemoveBloat                 # ads + Tier 1 cleanup
-.\Win11Debloat.ps1 -NoGui -RemoveBloat -Aggressive     # ads + Tier 1 + Tier 2
-.\Win11Debloat.ps1 -NoGui -RemoveBloat -DryRun         # preview, no changes
-```
+### Admin → end-user distribution
 
-## What it disables
+1. Admin runs the script on a test machine, configures the toggles, tests.
+2. Admin clicks **Export config** to write a JSON file.
+3. Admin distributes the JSON.
+4. End user runs `Win11Debloat.ps1 -ConfigFile <path-to-config.json>` (with
+   `-NoGui` for unattended apply, or without it to review in GUI first).
 
-| # | Section | What it does |
+## What's included
+
+| Category | Count | Source |
 |---|---|---|
-| 1 | Lock screen tips | Kills "fun facts" overlay and the MSN/weather redirect that opens Edge |
-| 2 | Start menu ads | Removes "Recommended", suggested apps, silently-installed promo apps |
-| 3 | System tips | "Get the most out of Windows", post-update welcome, suggestion notifications |
-| 4 | Settings app | Suggested-content cards inside Settings |
-| 5 | Advertising ID | Disables ad ID, tailored experiences, language tracking, writing-data telemetry |
-| 6 | File Explorer | OneDrive / sync provider promo notifications |
-| 7 | Search & widgets | Bing/news highlights in search box; widgets news feed (panel still works) |
-| 8 | Consumer Experiences | Group Policy that prevents Spotify/Disney/TikTok auto-installs |
-| 9 | Edge | New tab MSN feed, first-run nag, Rewards prompts, shopping assistant |
+| Ads & Promotions | 9 | Built-in (lock screen tips, Start menu, Edge promos, etc.) |
+| Telemetry | 7 | Built-in (DiagTrack disable, AllowTelemetry=0, CEIP tasks, WER, activity history, etc.) |
+| Bloat apps | 47 | Built-in (Tier 1 promo apps + Tier 2 real apps) |
+| Real Win Security | 7 | From Bitdefender catalogue (Follina, Tarrask, Exploit Protection, etc.) |
+| Network/SMB | 8 | SMB signing, anonymous SAM, IP source routing, etc. |
+| Credentials | 3 | Domain creds, LAPS, BitLocker on removable |
+| WinRM | 3 | Service disable, Digest auth, RunAs |
+| Optional services | 3 | Smart Card, Telephony, Microphone |
+| Browser cert/zones | 10 | Cert errors, EPM, RSS, Intranet UNCs |
+| IE/IE-Mode per-zone | 39 | Java, ActiveX, scripting, clipboard, drag-drop, XAML, .NET |
 
-## Bloat lists
+Total: **136 individually-toggleable actions.** All registry/service/task
+changes are snapshotted before being applied.
 
-### Tier 1 - third-party promos & obvious MS bloat
+Each security finding shows:
+- **Severity** (Critical / High / Medium / Low — our rubric, not Bitdefender's)
+- **Compatibility** (Safe / Caution / Breaking)
+- **Compatibility note** describing exactly what may break
+- Cross-references to Microsoft Learn, CIS Benchmark, DISA STIG
 
-Adobe Photoshop Express, Bubble Witch 3, Candy Crush, Disney+, Dolby Access,
-Duolingo, Eclipse Manager, Facebook, Flipboard, Hidden City, king.com games,
-LinkedIn, March of Empires, Netflix, Pandora, PicsArt, Spotify, TikTok,
-Twitter/X, Wunderlist, Microsoft Advertising SDK, MSN News, Bing Search,
-Get Help, Tips, Office Hub launcher, Solitaire, Mixed Reality Portal, Mobile
-Plans, People (legacy), Print 3D, consumer Skype, Wallet, Feedback Hub, Clipchamp.
+Hover any item in the GUI for the full description and references.
 
-### Tier 2 - real apps (only if you don't use them)
-
-Mail + Calendar, Phone Link, Maps, Media Player / Groove, Movies & TV, Sound
-Recorder, Alarms & Clock, Xbox app, Xbox overlays.
-
-> `Microsoft.XboxIdentityProvider` is intentionally **kept** even on Tier 2 -
-> some Win32 / Game Pass titles need it for sign-in.
-
-## What it does NOT touch
-
-- Spotlight wallpapers (rotating lock-screen pictures still work)
-- Widgets button itself (only the news/promo content)
-- Telemetry / diagnostics levels
-- Cortana / Search functionality
-- System-critical AppX: Microsoft Store, App Installer (winget), Terminal,
-  Photos, Paint, Calculator, Notepad, Snipping Tool, Camera, Sticky Notes,
-  Defender UI, .NET / VCLibs / UI XAML runtimes
-
-## Reversibility
-
-**Registry side.** Every change is a single registry value. Either re-enable
-specific items in **Settings**, or delete the keys this script created:
-
-```
-HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent
-HKLM:\SOFTWARE\Policies\Microsoft\Edge
-HKLM:\SOFTWARE\Policies\Microsoft\Dsh
-HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager
-HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo
-HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy
-```
-
-Then run `gpupdate /force`.
-
-**Bloat side.** Any uninstalled AppX can be reinstalled individually from the
-Microsoft Store. To restore the full default Windows set:
+## CLI mode
 
 ```powershell
-Get-AppxPackage -AllUsers | Foreach { Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" }
+# Just open the GUI (default)
+.\Win11Debloat.ps1
+
+# Apply a config file unattended
+.\Win11Debloat.ps1 -NoGui -ConfigFile good-baseline.json
+
+# Apply a config file but preview only
+.\Win11Debloat.ps1 -NoGui -ConfigFile good-baseline.json -DryRun
+
+# Review a config file in GUI before applying
+.\Win11Debloat.ps1 -ConfigFile good-baseline.json
 ```
+
+## Snapshot & rollback
+
+Every Apply creates two artifacts in `%LOCALAPPDATA%\Win11Debloat\`:
+- A System Restore Point (machine-wide, recovers via Windows System Restore)
+- A JSON snapshot in `snapshots\snapshot-<timestamp>.json` recording the old
+  registry value / service state / AppX install state for every change
+
+The GUI's **Rollback snapshot** button reads any snapshot back and reverses
+the changes. AppX uninstalls cannot be auto-restored (Microsoft Store is the
+only path); the snapshot lists them so you know what to reinstall.
+
+## Files in this repo
+
+| File | Purpose |
+|---|---|
+| `Win11Debloat.ps1` | The main script (loads catalogue, builds GUI, applies actions) |
+| `security_catalogue.json` | 73 Bitdefender-derived Windows security findings |
+| `bootstrap.ps1` | One-liner downloader + UAC re-launcher |
+| `LICENSE` | AGPL-3.0 |
+
+## What the script does NOT touch
+
+- Spotlight wallpapers (rotating lock screen pictures still work)
+- Widgets button (only the news/promo content)
+- Cortana / Search functionality
+- System-critical AppX (Store, Terminal, Calculator, Photos, Paint, Snipping
+  Tool, Camera, Sticky Notes, Defender UI, .NET / VCLibs / UI XAML runtimes)
+- `Audiosrv` (the Windows Audio service — the "Microphone" finding uses the
+  privacy consent broker instead)
+- `XboxIdentityProvider` (kept even on aggressive Tier 2 — some games need it)
+
+## Severity & compatibility breakdown of security catalogue
+
+| Severity | Count | | Compatibility | Count |
+|---|---|---|---|---|
+| Critical | 2 | | Safe | 31 |
+| High | 17 | | Caution | 39 |
+| Medium | 13 | | Breaking | 3 |
+| Low | 41 | | | |
+
+Critical = real-world exploited (Follina CVE-2022-30190, Tarrask APT
+persistence). Breaking = will reliably disrupt a common feature
+(Smart Card → YubiKey/CAC; Microphone deny → all voice apps; BitLocker
+deny-write removable → USB sticks become read-only).
 
 ## Requirements
 
-- Windows 11 Pro / Enterprise (Home will mostly work, but the Group Policy
-  bits in section 8 only fully apply on Pro+)
+- Windows 11 Pro / Enterprise (Home will mostly work but some Group Policy
+  hardening only fully applies on Pro+)
 - PowerShell 5.1+ (built in to Windows 11)
-- Administrator rights
-
-## Disclaimer
-
-Use at your own risk. The script is intentionally conservative and reversible,
-but every system is different. Run with `Dry run` first if you're unsure.
+- Administrator rights (bootstrap handles UAC)
 
 ## License
 
-AGPL-3.0 - see [LICENSE](LICENSE).
+AGPL-3.0 — see [LICENSE](LICENSE).
