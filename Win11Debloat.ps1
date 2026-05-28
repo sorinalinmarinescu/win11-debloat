@@ -186,7 +186,143 @@ function Save-Snapshot {
     $path  = Join-Path $script:SnapshotDir "snapshot-$stamp.json"
     $script:Snapshot | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
     Write-Log "  Snapshot saved: $path" 'DarkGray'
+
+    # Also drop a .reg recovery sidecar at C:\Win11Debloat-Recovery\ so the
+    # registry portion of the snapshot can be restored from Safe Mode (or
+    # any booted Windows) without launching this script's GUI.
+    try {
+        $regPath = Save-RecoveryRegFile -Stamp $stamp
+        if ($regPath) { Write-Log "  Recovery .reg saved: $regPath" 'DarkGray' }
+    } catch {
+        Write-Log "  [WARN] could not write recovery .reg: $($_.Exception.Message)" 'Yellow'
+    }
+
     return $path
+}
+
+# -----------------------------------------------------------------------------
+# Save-RecoveryRegFile
+# Out-of-band recovery: produce a Windows-Registry-Editor .reg file that
+# undoes every Add-RegSnapshot entry. Goes to a fixed top-level path so a
+# user can find it easily after a boot failure.
+#
+# Usage on a booted Windows (incl. Safe Mode): reg.exe import <file>
+# Usage from raw WinRE/recovery CMD: load the live system hive into the
+# WinRE registry first (`reg load HKLM\TempSys C:\Windows\System32\config\SYSTEM`)
+# and edit/import within that mapping. We document the Safe-Mode path because
+# it is the realistic recovery flow for non-experts; a header comment in the
+# .reg file explains both.
+#
+# REG_DWORD values use the "dword:HHHHHHHH" syntax.
+# REG_SZ values are quoted strings.
+# Values that did not exist before are emitted as `"name"=-` which deletes
+# the value when the .reg is imported.
+# -----------------------------------------------------------------------------
+function Save-RecoveryRegFile {
+    param([string]$Stamp)
+    if (-not $script:Snapshot -or -not $script:Snapshot.registry -or
+        $script:Snapshot.registry.Count -eq 0) { return $null }
+
+    $recDir = Join-Path $env:SystemDrive 'Win11Debloat-Recovery'
+    if (-not (Test-Path $recDir)) { New-Item -Path $recDir -ItemType Directory -Force | Out-Null }
+    $outPath = Join-Path $recDir "undo-$Stamp.reg"
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('Windows Registry Editor Version 5.00')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine("; Win11Debloat recovery file - generated $((Get-Date).ToString('o'))")
+    [void]$sb.AppendLine("; Snapshot: snapshot-$Stamp.json")
+    [void]$sb.AppendLine(';')
+    [void]$sb.AppendLine('; HOW TO USE:')
+    [void]$sb.AppendLine(';   1. Easiest: boot Windows (Safe Mode is fine), open admin CMD,')
+    [void]$sb.AppendLine(";        reg.exe import `"$outPath`"")
+    [void]$sb.AppendLine(';      Then reboot. This undoes every registry change in the snapshot.')
+    [void]$sb.AppendLine(';   2. From WinRE/recovery CMD: HKLM/HKCU below refer to the LIVE')
+    [void]$sb.AppendLine(';      system hives, not WinRE`s. From bare WinRE you must first load')
+    [void]$sb.AppendLine(';      the relevant hives with `reg load`. Most users should reboot to')
+    [void]$sb.AppendLine(';      Safe Mode (F8/Shift+Restart) and use option 1 instead.')
+    [void]$sb.AppendLine(';')
+    [void]$sb.AppendLine('; This file ONLY restores the registry portion of the snapshot.')
+    [void]$sb.AppendLine('; Service start types and AppX packages must be restored separately')
+    [void]$sb.AppendLine('; via the script GUI Rollback button.')
+    [void]$sb.AppendLine('')
+
+    # Convert PS-style HKLM:\path  ->  .reg-style [HKEY_LOCAL_MACHINE\path]
+    function ConvertTo-RegHive([string]$psPath) {
+        $p = $psPath -replace '^HKLM:\\','HKEY_LOCAL_MACHINE\' `
+                     -replace '^HKCU:\\','HKEY_CURRENT_USER\' `
+                     -replace '^HKCR:\\','HKEY_CLASSES_ROOT\' `
+                     -replace '^HKU:\\', 'HKEY_USERS\' `
+                     -replace '^HKEY_LOCAL_MACHINE:\\','HKEY_LOCAL_MACHINE\' `
+                     -replace '^HKEY_CURRENT_USER:\\','HKEY_CURRENT_USER\'
+        return $p
+    }
+
+    # Group by full key path so we emit one [section] header per key.
+    $byKey = @{}
+    foreach ($r in $script:Snapshot.registry) {
+        $regKey = ConvertTo-RegHive $r.path
+        if (-not $byKey.ContainsKey($regKey)) { $byKey[$regKey] = @() }
+        $byKey[$regKey] += $r
+    }
+
+    foreach ($key in $byKey.Keys) {
+        [void]$sb.AppendLine("[$key]")
+        foreach ($r in $byKey[$key]) {
+            $valName = '"' + ($r.name -replace '\\','\\\\' -replace '"','\\"') + '"'
+            if (-not $r.existed) {
+                # Value didn't exist prior to our change -> delete on import
+                [void]$sb.AppendLine("$valName=-")
+                continue
+            }
+            $type = if ($r.oldType) { $r.oldType } else { 'DWord' }
+            switch ($type) {
+                'DWord' {
+                    $hex = ('{0:x8}' -f [int]$r.oldValue)
+                    [void]$sb.AppendLine("$valName=dword:$hex")
+                }
+                'QWord' {
+                    $hex = ('{0:x16}' -f [long]$r.oldValue)
+                    # REG_QWORD as little-endian hex bytes
+                    $bytes = for ($i = 0; $i -lt 16; $i += 2) { $hex.Substring($i,2) }
+                    $rev = ($bytes[7..0]) -join ','
+                    [void]$sb.AppendLine("$valName=hex(b):$rev")
+                }
+                'String' {
+                    $esc = ($r.oldValue -replace '\\','\\\\' -replace '"','\\"')
+                    [void]$sb.AppendLine("$valName=`"$esc`"")
+                }
+                'ExpandString' {
+                    # REG_EXPAND_SZ stored as hex(2):<UTF-16LE bytes,null-terminated>
+                    $bytes = [System.Text.Encoding]::Unicode.GetBytes([string]$r.oldValue + "`0")
+                    $hexBytes = ($bytes | ForEach-Object { '{0:x2}' -f $_ }) -join ','
+                    [void]$sb.AppendLine("$valName=hex(2):$hexBytes")
+                }
+                'MultiString' {
+                    # REG_MULTI_SZ stored as hex(7):<UTF-16LE bytes>
+                    $joined = (@($r.oldValue) -join "`0") + "`0`0"
+                    $bytes = [System.Text.Encoding]::Unicode.GetBytes($joined)
+                    $hexBytes = ($bytes | ForEach-Object { '{0:x2}' -f $_ }) -join ','
+                    [void]$sb.AppendLine("$valName=hex(7):$hexBytes")
+                }
+                'Binary' {
+                    $bytes = [byte[]]$r.oldValue
+                    $hexBytes = ($bytes | ForEach-Object { '{0:x2}' -f $_ }) -join ','
+                    [void]$sb.AppendLine("$valName=hex:$hexBytes")
+                }
+                default {
+                    # Unknown type -> emit a comment rather than a guess
+                    [void]$sb.AppendLine("; (skipped: unknown type $type for $valName)")
+                }
+            }
+        }
+        [void]$sb.AppendLine('')
+    }
+
+    # .reg files require BOM-less UTF-16 LE; Set-Content with -Encoding Unicode
+    # gives us BOM'd UTF-16 LE which reg.exe accepts.
+    Set-Content -Path $outPath -Value $sb.ToString() -Encoding Unicode
+    return $outPath
 }
 
 function Get-SnapshotList {
@@ -203,9 +339,15 @@ function Invoke-SnapshotRestore {
     Write-Log "Loading snapshot $SnapshotFile" 'Cyan'
     $snap = Get-Content $SnapshotFile -Raw | ConvertFrom-Json
 
-    # Restore registry values in REVERSE order (LIFO)
+    # Restore registry values in REVERSE order (LIFO).
+    # NOTE: PowerShell 5.1's `Select-Object -Last $n` preserves source order
+    # (it's "the last n items in their original order", NOT a reverse). We need
+    # a true reverse so a parent key created last is also restored/removed last,
+    # and dependencies are unwound in opposite order of creation.
     Write-Log "[Registry] restoring $($snap.registry.Count) value(s)" 'Yellow'
-    foreach ($r in @($snap.registry | Select-Object -Last $snap.registry.Count) ) {
+    $regArr = @($snap.registry)
+    for ($i = $regArr.Count - 1; $i -ge 0; $i--) {
+        $r = $regArr[$i]
         try {
             if ($r.existed) {
                 if (-not (Test-Path $r.path)) { New-Item -Path $r.path -Force | Out-Null }
@@ -511,6 +653,22 @@ $script:AdActions = @(
         Category='Ads & Promotions'
         Action={ $edge="HKLM:\SOFTWARE\Policies\Microsoft\Edge"; Set-Reg $edge "HideFirstRunExperience" 1; Set-Reg $edge "ShowRecommendationsEnabled" 0; Set-Reg $edge "PersonalizationReportingEnabled" 0; Set-Reg $edge "NewTabPageContentEnabled" 0; Set-Reg $edge "NewTabPageQuickLinksEnabled" 0; Set-Reg $edge "NewTabPageHideDefaultTopSites" 1; Set-Reg $edge "EdgeShoppingAssistantEnabled" 0; Set-Reg $edge "ShowMicrosoftRewards" 0 }
     }
+    @{
+        Id='ad-disable-copilot'
+        Title='Disable Windows Copilot'
+        Detail='Removes the Copilot taskbar button and disables the Copilot integration policy machine-wide and per-user.'
+        Category='Ads & Promotions'
+        Action={
+            # Machine-wide policy: blocks Copilot from launching for all users.
+            Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" "TurnOffWindowsCopilot" 1
+            # Per-user policy mirror.
+            Set-Reg "HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot" "TurnOffWindowsCopilot" 1
+            # Hide the taskbar button on Win11 22H2+ (it lingers as a stub
+            # even after the policy disables the underlying feature, so kill
+            # the tray entry too).
+            Set-Reg "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowCopilotButton" 0
+        }
+    }
 )
 
 $script:TelemetryActions = @(
@@ -581,10 +739,24 @@ $script:TelemetryActions = @(
     }
     @{
         Id='tel-disable-cloud-sync'
-        Title='Disable cloud-based suggestions in IME / Search'
-        Detail='Online tips, search suggestions, cloud handwriting recognition.'
+        Title='Disable cloud-based suggestions in IME / Search / Bing web search'
+        Detail='Online tips, search-box suggestions, Bing web search in Start, cloud handwriting recognition.'
         Category='Telemetry'
-        Action={ $p="HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"; Set-Reg $p "BingSearchEnabled" 0; Set-Reg $p "CortanaConsent" 0; Set-Reg $p "CortanaCloudSearchEnabled" 0; Set-Reg "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitInkCollection" 1; Set-Reg "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitTextCollection" 1 }
+        Action={
+            # Per-user runtime keys (legacy + still respected on some Win11 builds)
+            $p="HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
+            Set-Reg $p "BingSearchEnabled" 0
+            Set-Reg $p "CortanaConsent" 0
+            Set-Reg $p "CortanaCloudSearchEnabled" 0
+            # Modern Win11 22H2+ web-search controls (these are the keys that
+            # actually work on current builds; the legacy two above are not
+            # sufficient on their own).
+            Set-Reg "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 1
+            Set-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "DisableWebSearch" 1
+            # Don't send writing data / URL paths back to Microsoft
+            Set-Reg "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitInkCollection" 1
+            Set-Reg "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitTextCollection" 1
+        }
     }
 )
 

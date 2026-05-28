@@ -2,20 +2,20 @@
   "schemaVersion": 1,
   "generatedAt": "2026-05-28T11:09:25.087000Z",
   "summary": {
-    "total": 73,
+    "total": 74,
     "bySeverity": {
-      "High": 17,
+      "High": 18,
       "Critical": 2,
       "Medium": 13,
       "Low": 41
     },
     "byCompatibility": {
-      "Caution": 39,
+      "Caution": 40,
       "Safe": 31,
       "Breaking": 3
     },
     "byCategory": {
-      "win_security": 7,
+      "win_security": 8,
       "credentials": 3,
       "network": 8,
       "winrm": 3,
@@ -3359,6 +3359,53 @@
         }
       ],
       "categoryId": "ie_legacy"
+    },
+    {
+      "id": "bcdedit-disable-boot-debug",
+      "originalName": "Disable Boot Debugging / Protect BitLocker",
+      "friendlyName": "Disable BCD bootdebug/debug flags (BitLocker physical-attack hardening)",
+      "description": "Windows Boot Configuration Data carries two debug flags that, if left on, give a physical attacker a path around TPM-only BitLocker: 'bootdebug' attaches a kernel debugger to the boot loader and 'debug' attaches one to the running kernel, both of which can be exercised pre-volume-unlock to inspect or modify the boot sequence and ultimately drop the attacker into an environment that can read protected data. Microsoft's BitLocker countermeasures and the Microsoft Security Baseline both call out disabling these as a baseline mitigation against direct-memory-access (DMA), evil-maid and cold-boot-class attacks where an attacker has physical possession of the machine. The fix is the documented 'bcdedit /set {default} bootdebug off' and 'bcdedit /set {default} debug off' pair, which writes to the live BCD store. The values stick across reboots and require physical or admin access to flip back, so they are also a useful tamper-evidence baseline to monitor.",
+      "severity": "High",
+      "compatibility": "Caution",
+      "compatNote": "Disables kernel and boot debugging on this machine. Legitimate impact is limited to driver developers and kernel debuggers (WinDbg over serial / 1394 / USB / network) - if you do live kernel debugging, leave these enabled and use BitLocker with a TPM+PIN or TPM+startup-key protector instead. End users see no behaviour change; reboots are unaffected. Note that the BCD store is per-bootloader-entry: '{default}' covers the typical single-OS install but if you have multi-boot / Insider / recovery entries, repeat for each identifier returned by 'bcdedit /enum'.",
+      "bdRiskOriginal": 0,
+      "previouslyIgnored": false,
+      "implementation": {
+        "type": "command",
+        "command": [
+          {
+            "shell": "cmd",
+            "command": "bcdedit /set {default} bootdebug off",
+            "description": "Disables boot loader debugging on the default boot entry. Prevents an attacker with physical access from attaching a debugger to the bootmgr/winload pre-BitLocker-unlock."
+          },
+          {
+            "shell": "cmd",
+            "command": "bcdedit /set {default} debug off",
+            "description": "Disables kernel-mode debugging on the default boot entry. Prevents post-boot debugger attach paths that could be used to read decrypted volume contents."
+          }
+        ],
+        "notes": "Effective on next boot. Rollback: 'bcdedit /set {default} bootdebug on' and 'bcdedit /set {default} debug on'. To audit other boot entries, run 'bcdedit /enum' and apply the same pair to each identifier (some recovery / Insider entries may need separate treatment). Pair with TPM+PIN BitLocker protectors and disable 1394/Thunderbolt DMA via 'Disable new DMA devices when this computer is locked' (already covered by Microsoft Security Baseline) for full physical-attack hardening."
+      },
+      "verification": "$bcd = (& bcdedit /enum '{default}' | Out-String); ($bcd -match 'bootdebug\\s+No') -and ($bcd -match '(?<![a-z])debug\\s+No')",
+      "references": [
+        {
+          "label": "Microsoft Learn - BitLocker countermeasures (physical attack mitigations)",
+          "url": "https://learn.microsoft.com/en-us/windows/security/operating-system-security/data-protection/bitlocker/countermeasures"
+        },
+        {
+          "label": "Microsoft Learn - bcdedit command reference (boot debugging)",
+          "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/bcdedit--debug"
+        },
+        {
+          "label": "Microsoft Learn - Protecting BCD against tampering",
+          "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/boot-options-in-windows"
+        },
+        {
+          "label": "Microsoft Security Baseline - Windows 11 (kernel debugging recommendations)",
+          "url": "https://www.microsoft.com/en-us/download/details.aspx?id=55319"
+        }
+      ],
+      "categoryId": "win_security"
     }
   ]
 }
