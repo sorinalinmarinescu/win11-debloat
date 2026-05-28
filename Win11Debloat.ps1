@@ -769,12 +769,104 @@ function Invoke-CliMode {
 }
 
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Catalogue-missing dialog (shown only in GUI mode when security_catalogue.json
+# can't be found). User clicks OK to continue with reduced functionality.
+# -----------------------------------------------------------------------------
+function Show-CatalogueMissingDialog {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $url = 'https://github.com/sorinalinmarinescu/win11-debloat'
+    $oneLiner = 'irm https://raw.githubusercontent.com/sorinalinmarinescu/win11-debloat/main/bootstrap.ps1 | iex'
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Security catalogue not found'
+    $dlg.Size = New-Object System.Drawing.Size(620, 340)
+    $dlg.StartPosition = 'CenterScreen'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+
+    $icon = New-Object System.Windows.Forms.PictureBox
+    $icon.Location = New-Object System.Drawing.Point(15, 15)
+    $icon.Size = New-Object System.Drawing.Size(48, 48)
+    $icon.SizeMode = 'Zoom'
+    $icon.Image = [System.Drawing.SystemIcons]::Warning.ToBitmap()
+    $dlg.Controls.Add($icon)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Location = New-Object System.Drawing.Point(75, 15)
+    $lbl.Size = New-Object System.Drawing.Size(515, 90)
+    $lbl.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $lbl.Text = "security_catalogue.json was not found alongside the script.`r`n`r`nWithout it, the Security tabs (73 Bitdefender-derived findings) won't be available - only Ads, Telemetry and Bloat Apps tabs will work.`r`n`r`nGet the full bundle (script + catalogue + bootstrap) from:"
+    $dlg.Controls.Add($lbl)
+
+    $link = New-Object System.Windows.Forms.LinkLabel
+    $link.Location = New-Object System.Drawing.Point(75, 110)
+    $link.Size = New-Object System.Drawing.Size(515, 22)
+    $link.Text = $url
+    $link.LinkColor = [System.Drawing.Color]::FromArgb(0, 102, 204)
+    $link.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Underline)
+    $link.Add_LinkClicked({
+        try { Start-Process $url } catch { }
+    }.GetNewClosure())
+    $dlg.Controls.Add($link)
+
+    $tipLabel = New-Object System.Windows.Forms.Label
+    $tipLabel.Location = New-Object System.Drawing.Point(75, 140)
+    $tipLabel.Size = New-Object System.Drawing.Size(515, 36)
+    $tipLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $tipLabel.Text = 'Tip: easiest install is the README one-liner. It downloads both files and re-launches elevated automatically. Click below to copy it to the clipboard:'
+    $tipLabel.ForeColor = [System.Drawing.Color]::DimGray
+    $dlg.Controls.Add($tipLabel)
+
+    $cmdBox = New-Object System.Windows.Forms.TextBox
+    $cmdBox.Location = New-Object System.Drawing.Point(75, 180)
+    $cmdBox.Size = New-Object System.Drawing.Size(420, 22)
+    $cmdBox.Font = New-Object System.Drawing.Font('Consolas', 9)
+    $cmdBox.ReadOnly = $true
+    $cmdBox.Text = $oneLiner
+    $dlg.Controls.Add($cmdBox)
+
+    $btnCopy = New-Object System.Windows.Forms.Button
+    $btnCopy.Text = 'Copy'
+    $btnCopy.Location = New-Object System.Drawing.Point(500, 178)
+    $btnCopy.Size = New-Object System.Drawing.Size(90, 26)
+    $btnCopy.Add_Click({
+        try { [System.Windows.Forms.Clipboard]::SetText($oneLiner); $btnCopy.Text = 'Copied!' } catch { }
+    }.GetNewClosure())
+    $dlg.Controls.Add($btnCopy)
+
+    $btnOpen = New-Object System.Windows.Forms.Button
+    $btnOpen.Text = 'Open in browser'
+    $btnOpen.Location = New-Object System.Drawing.Point(75, 250)
+    $btnOpen.Size = New-Object System.Drawing.Size(160, 32)
+    $btnOpen.Add_Click({ try { Start-Process $url } catch { } }.GetNewClosure())
+    $dlg.Controls.Add($btnOpen)
+
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = 'Continue with reduced functionality'
+    $btnOk.Location = New-Object System.Drawing.Point(280, 250)
+    $btnOk.Size = New-Object System.Drawing.Size(310, 32)
+    $btnOk.DialogResult = 'OK'
+    $dlg.AcceptButton = $btnOk
+    $dlg.Controls.Add($btnOk)
+
+    [void]$dlg.ShowDialog()
+}
+
+# -----------------------------------------------------------------------------
 # GUI mode
 # -----------------------------------------------------------------------------
 function Show-Gui {
     param($Catalogue)
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
+
+    if (-not $Catalogue) {
+        Show-CatalogueMissingDialog
+    }
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text          = "Win11 Debloat & Hardening v$($script:Version)"
