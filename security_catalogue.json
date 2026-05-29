@@ -2,20 +2,20 @@
   "schemaVersion": 1,
   "generatedAt": "2026-05-28T11:09:25.087000Z",
   "summary": {
-    "total": 74,
+    "total": 77,
     "bySeverity": {
-      "High": 18,
+      "High": 20,
       "Critical": 2,
-      "Medium": 13,
+      "Medium": 14,
       "Low": 41
     },
     "byCompatibility": {
-      "Caution": 40,
-      "Safe": 31,
+      "Caution": 41,
+      "Safe": 33,
       "Breaking": 3
     },
     "byCategory": {
-      "win_security": 8,
+      "win_security": 11,
       "credentials": 3,
       "network": 8,
       "winrm": 3,
@@ -3398,6 +3398,124 @@
         {
           "label": "Microsoft Security Baseline - Windows 11 (kernel debugging recommendations)",
           "url": "https://www.microsoft.com/en-us/download/details.aspx?id=55319"
+        }
+      ],
+      "categoryId": "win_security"
+    },
+    {
+      "id": "bcdedit-disable-hypervisor-debug",
+      "originalName": "Disable Hypervisor Debugging",
+      "friendlyName": "Disable BCD hypervisordebug flag (VBS / Credential Guard hardening)",
+      "description": "Windows Boot Configuration Data has a separate {hypervisor} entry whose 'hypervisordebug' element controls whether the Windows Hypervisor itself can be attached to a debugger. Hypervisor debugging is the lowest possible attach point on a VBS-protected machine: an attacker who can debug the hypervisor can step around Virtualization Based Security (VBS), Credential Guard, and Hypervisor-protected Code Integrity, and read VSM-isolated secrets out of memory. The fix is the documented 'bcdedit /set {hypervisor} hypervisordebug off'. On most Win11 Pro installs hypervisordebug is already off by default, so this finding mostly serves as tamper-evidence: if 'bcdedit /enum {hypervisor}' ever shows hypervisordebug=Yes you know someone explicitly enabled it. Pair with bcdedit-disable-boot-debug for the complete pre-OS / hypervisor / kernel debugger lockdown.",
+      "severity": "High",
+      "compatibility": "Safe",
+      "compatNote": "Only impacts engineers actively kernel-debugging the Windows Hypervisor itself (extremely rare outside Microsoft / Hyper-V driver development). Has no effect on guest VMs, Hyper-V usability, WSL2, Windows Sandbox, or VBS. If Hyper-V / VBS is not installed at all, the {hypervisor} BCD entry may not exist, in which case bcdedit prints 'An error has occurred setting the element data' and exits non-zero - this is harmless and the script absorbs it.",
+      "bdRiskOriginal": 0,
+      "previouslyIgnored": false,
+      "implementation": {
+        "type": "command",
+        "command": [
+          {
+            "shell": "powershell",
+            "command": "$r = & bcdedit.exe /set '{hypervisor}' hypervisordebug off 2>&1; if ($LASTEXITCODE -ne 0) { Write-Warning \"bcdedit /set {hypervisor} hypervisordebug off -> exit $LASTEXITCODE : $r (likely Hyper-V/{hypervisor} entry not present, which is fine)\" } else { Write-Host '  [OK]  bcdedit /set {hypervisor} hypervisordebug off' }",
+            "description": "Disables hypervisor debugging on the {hypervisor} BCD entry. Tolerates the case where {hypervisor} doesn't exist (Hyper-V not installed) by logging a warning and continuing."
+          }
+        ],
+        "notes": "Effective on next boot. Rollback: 'bcdedit /set {hypervisor} hypervisordebug on'. To audit: 'bcdedit /enum {hypervisor}' should show 'hypervisordebug No' (or fail with 'The boot configuration data store could not be opened' if {hypervisor} doesn't exist - which counts as compliant). The companion 'hypervisorlaunchtype Auto' element controls whether VBS/Hyper-V launches at all; this setting only governs whether IT is debuggable while running."
+      },
+      "verification": "$bcd = (& bcdedit.exe /enum '{hypervisor}' 2>&1 | Out-String); if ($bcd -match 'hypervisordebug\\s+Yes') { $false } else { $true }",
+      "references": [
+        {
+          "label": "Microsoft Learn - bcdedit /set Boot options",
+          "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/bcd-boot-options-reference"
+        },
+        {
+          "label": "Microsoft Learn - Setting up the hypervisor for debugging",
+          "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/setting-up-the-hyper-v-debugger-transport"
+        },
+        {
+          "label": "Microsoft Learn - Virtualization-based Security (VBS) overview",
+          "url": "https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/oem-vbs"
+        }
+      ],
+      "categoryId": "win_security"
+    },
+    {
+      "id": "bitlocker-disable-dma-under-lock",
+      "originalName": "Disable new DMA devices when this computer is locked",
+      "friendlyName": "Block new DMA-capable devices while the machine is locked (DisableExternalDMAUnderLock=1)",
+      "description": "Direct Memory Access devices (Thunderbolt 3/4, USB4, certain PCIe cards) bypass the CPU and read system RAM directly. While a laptop is locked but powered, an attacker who plugs in a malicious DMA device (Thunderspy, PCILeech, FaceDancer-style attack tooling) can scrape RAM contents - which on a BitLocker-unlocked system include the volume master key. Setting DisableExternalDMAUnderLock=1 tells the kernel not to enumerate any new hot-pluggable DMA-capable device while the workstation is in the locked state. Documented as 'Disable new DMA devices when this computer is locked' in the Microsoft Security Baseline and the BitLocker countermeasures page. Works alongside (not instead of) Kernel DMA Protection, which is the silicon-level mitigation present on Win11 hardware released since ~2018.",
+      "severity": "High",
+      "compatibility": "Safe",
+      "compatNote": "Hot-plugging a Thunderbolt/USB4 dock or eGPU while the machine is locked: the device will not enumerate until the user unlocks. After unlock, plug-and-play resumes normally. Already-connected devices keep working through lock cycles. IMPORTANT CAVEAT: this policy ONLY takes effect when BitLocker is enabled on the OS volume. On a non-BitLocker'd system the registry value is set but has no behavioral effect - turn BitLocker on first to actually get the protection. On modern hardware that ships with Kernel DMA Protection enabled (most Win11-supported devices), KDP gives stronger silicon-level protection; this software policy adds defense-in-depth and covers older hardware without KDP.",
+      "bdRiskOriginal": 0,
+      "previouslyIgnored": false,
+      "implementation": {
+        "type": "registry",
+        "registry": [
+          {
+            "path": "HKLM:\\SOFTWARE\\Policies\\Microsoft\\FVE",
+            "name": "DisableExternalDMAUnderLock",
+            "value": 1,
+            "valueType": "DWord",
+            "purpose": "1 = Block enumeration of new hot-pluggable DMA-capable devices while the system is locked. Maps to GPO 'Computer Configuration > Administrative Templates > Windows Components > BitLocker Drive Encryption > Operating System Drives > Disable new DMA devices when this computer is locked' = Enabled."
+          }
+        ],
+        "notes": "No reboot required - effective on next lock state change. Rollback: set to 0 or delete the value. Verify by running 'pnputil /enum-devices /class PCI' before and after locking the machine and hot-plugging a DMA device. To check Kernel DMA Protection status (the silicon-level companion): 'msinfo32' > 'Kernel DMA Protection'."
+      },
+      "verification": "(Test-Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\FVE') -and ((Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\FVE' -Name DisableExternalDMAUnderLock -ErrorAction SilentlyContinue).DisableExternalDMAUnderLock -eq 1)",
+      "references": [
+        {
+          "label": "Microsoft Learn - BitLocker countermeasures (attacker with physical access)",
+          "url": "https://learn.microsoft.com/en-us/windows/security/operating-system-security/data-protection/bitlocker/countermeasures"
+        },
+        {
+          "label": "Microsoft Learn - Kernel DMA Protection",
+          "url": "https://learn.microsoft.com/en-us/windows/security/hardware-security/kernel-dma-protection-for-thunderbolt"
+        },
+        {
+          "label": "Microsoft Learn - BitLocker Group Policy settings",
+          "url": "https://learn.microsoft.com/en-us/windows/security/operating-system-security/data-protection/bitlocker/configure"
+        }
+      ],
+      "categoryId": "win_security"
+    },
+    {
+      "id": "disable-crash-dumps",
+      "originalName": "Disable memory crash dumps (MEMORY.DMP)",
+      "friendlyName": "Disable system crash dumps to prevent post-crash credential / key extraction",
+      "description": "When Windows hits a fatal kernel error (BSOD), the crash dump engine writes a portion of physical RAM to disk - by default %SystemRoot%\\MEMORY.DMP for full/kernel/automatic dumps, or %SystemRoot%\\Minidump\\*.dmp for small dumps. Live RAM at the time of crash typically contains the BitLocker volume master key (after unlock), cached domain credentials, browser session tokens, EFS keys, KeePass-style password manager unlocked vaults, and full plaintext memory of every running process. An attacker who can read MEMORY.DMP off the disk later (e.g. unencrypted machine recovered from a crash, drive seized, backup exfiltrated) gets all of those secrets. Setting CrashDumpEnabled=0 disables dump creation entirely. TRADEOFF: this is the most aggressive setting (0 = no dumps of any kind). Microsoft documents 0=None, 1=Complete, 2=Kernel, 3=Small-256KB-minidump, 7=Automatic-default. Setting to 3 instead of 0 keeps a small minidump (no RAM payload, just basic crash metadata) which preserves SOME diagnostic capability. We expose 0 here because it's the security-baseline recommendation, but operators in low-threat environments may prefer to keep CrashDumpEnabled=3 manually. RELATED LEAK NOT COVERED BY THIS FINDING: hiberfil.sys (when hibernation is enabled) and pagefile.sys also contain RAM contents - run 'powercfg /h off' to disable hibernation entirely if you want to close those leaks too.",
+      "severity": "Medium",
+      "compatibility": "Caution",
+      "compatNote": "Significant operational cost. After applying: (1) BSODs produce no diagnostic artifact - you cannot identify the faulty driver / hardware / OS component that caused a crash. (2) Microsoft Support cannot assist with recurring blue screens; their first ask is always 'send us the dump'. (3) Driver vendors (NVIDIA, Intel, etc.) cannot debug their own driver crashes on your machine. (4) IT incident response loses a primary forensic source. RECOMMEND ONLY for high-threat environments (journalists at risk, financial trading endpoints, classified or regulated workloads where the data sensitivity outweighs operational diagnostics). For typical home/SMB users the cost-benefit analysis usually favors keeping crash dumps enabled (default = 7 = Automatic) and instead relying on full-disk encryption (BitLocker with TPM+PIN) to protect the dump file at rest. Note: this only addresses crash dumps, not hibernation (hiberfil.sys) or page swap (pagefile.sys) - the latter also contain RAM contents.",
+      "bdRiskOriginal": 0,
+      "previouslyIgnored": false,
+      "implementation": {
+        "type": "registry",
+        "registry": [
+          {
+            "path": "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CrashControl",
+            "name": "CrashDumpEnabled",
+            "value": 0,
+            "valueType": "DWord",
+            "purpose": "Crash dump type. 0 = None (no dump), 1 = Complete (entire RAM), 2 = Kernel, 3 = Small minidump (256KB), 7 = Automatic (default). Setting 0 disables dumps entirely - this is the security-baseline maximum. Many operators prefer 3 (small minidump) as a middle ground: no RAM payload but enough metadata to identify a faulty driver."
+          }
+        ],
+        "notes": "No reboot required - effective on next crash. Rollback: set to 7 (Automatic, the Win11 default), or 3 (Small minidump - keeps basic BSOD diagnostics without dumping RAM). Existing %SystemRoot%\\MEMORY.DMP on disk is NOT removed by this policy - delete it manually after applying if it contains historical RAM data you want gone: 'Remove-Item C:\\Windows\\MEMORY.DMP -Force ; Remove-Item C:\\Windows\\Minidump\\*.dmp -Force'. To also close the hibernation-file leak path: 'powercfg /h off' (frees ~RAM-sized disk and removes C:\\hiberfil.sys)."
+      },
+      "verification": "(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CrashControl' -Name CrashDumpEnabled -ErrorAction SilentlyContinue).CrashDumpEnabled -eq 0",
+      "references": [
+        {
+          "label": "Microsoft Learn - Generate a kernel or complete crash dump",
+          "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/generate-a-kernel-or-complete-crash-dump"
+        },
+        {
+          "label": "Microsoft Learn - Vary the approach to memory dump file",
+          "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/memory-dump-file-options"
+        },
+        {
+          "label": "Microsoft Learn - CrashControl registry values",
+          "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/varying-the-approach-to-a-kernel-mode-dump-file"
         }
       ],
       "categoryId": "win_security"
